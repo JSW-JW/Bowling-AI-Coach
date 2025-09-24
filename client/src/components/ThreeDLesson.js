@@ -1,17 +1,79 @@
-import React, { useEffect, useMemo, useRef, useState, Suspense } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useCallback, Suspense } from 'react';
 import * as THREE from 'three';
-import { Canvas, useFrame } from '@react-three/fiber';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, useGLTF, useAnimations, Stats, Center } from '@react-three/drei';
 import { SkeletonUtils } from 'three-stdlib';
+import ShinyText from './ShinyText';
 
 // 각 스텝의 애니메이션 구간/텍스트/속도
 const stepData = {
-  1: { start: 0.5, end: 1.5, text: 'Step 1: Initial step. Step forward shortly.', speed: 1.0 },
-  2: { start: 1.55, end: 2.35, text: 'Step 2: Right foot forward with cross over on the left foot line.', speed: 1.0 },
-  3: { start: 2.35, end: 2.75, text: 'Step 3: Long stride. Keep left foot from overlapping the right.', speed: 0.7 },
-  4: { start: 2.75, end: 3.15, text: 'Step 4: Pivot step, very short with cross over.', speed: 0.7 },
-  5: { start: 3.15, end: 4.5, text: 'Step 5: Shift body weight to left foot in one second.', speed: 1.0 },
+  1: {
+    start: 0.5,
+    end: 1.5,
+    text: 'Step 1: Initial step. Step forward shortly.',
+    speed: 1.0,
+    highlight: { label: 'Set Rhythm', detail: 'Short timing step to establish tempo.' },
+  },
+  2: {
+    start: 1.55,
+    end: 2.35,
+    text: 'Step 2: Right foot forward with cross over on the left foot line.',
+    speed: 1.0,
+    highlight: { label: 'Cross Over', detail: 'Right foot crosses the left line.' },
+  },
+  3: {
+    start: 2.35,
+    end: 2.75,
+    text: 'Step 3: Long stride. Keep left foot from overlapping the right.',
+    speed: 0.7,
+    highlight: { label: 'Stay Parallel', detail: 'Feet stay separated—no crossover.' },
+  },
+  4: {
+    start: 2.75,
+    end: 3.15,
+    text: 'Step 4: Pivot step, very short with cross over.',
+    speed: 0.7,
+    highlight: { label: 'Quick Cross', detail: 'Short pivot with a clean crossover.' },
+  },
+  5: {
+    start: 3.15,
+    end: 4.5,
+    text: 'Step 5: Shift body weight to left foot in one second.',
+    speed: 1.0,
+    highlight: { label: 'Shift Weight', detail: 'Move weight smoothly from right to left.' },
+  },
 };
+
+const STEP_DELAY_MS = 1500;
+const GUIDE_DISPLAY_MS = 1200;
+const CAMERA_BASE_HEIGHT = 1.5;
+const CAMERA_CLOSE_Z = 4.0;
+const CAMERA_ANIM_Z = 4.8;
+const CAMERA_OVERVIEW_Z = 9.5;
+
+function CameraRig({ focusPosition, focusLookAt }) {
+  const { camera } = useThree();
+  const targetPosition = useRef(new THREE.Vector3(...focusPosition));
+  const targetLookAt = useRef(new THREE.Vector3(...focusLookAt));
+  const currentLookAt = useRef(new THREE.Vector3(...focusLookAt));
+
+  useEffect(() => {
+    targetPosition.current.set(...focusPosition);
+  }, [focusPosition]);
+
+  useEffect(() => {
+    targetLookAt.current.set(...focusLookAt);
+  }, [focusLookAt]);
+
+  useFrame((_, delta) => {
+    const lerpFactor = 1 - Math.pow(0.001, delta * 60);
+    camera.position.lerp(targetPosition.current, lerpFactor);
+    currentLookAt.current.lerp(targetLookAt.current, lerpFactor);
+    camera.lookAt(currentLookAt.current);
+  });
+
+  return null;
+}
 
 /**
  * Model: 하나의 스텝 슬롯. active일 때만 재생하고, end에서 정지(마지막 프레임 고정) 후 onDone 호출.
@@ -22,6 +84,7 @@ function StepModel({
   stepInfo,
   stepIndex,
   currentStepIndex,
+  sequenceId,
   position = [0, 0, 0],
   rotation = [0, 0, 0],
   active = false,
@@ -30,6 +93,7 @@ function StepModel({
   const group = useRef();
   const doneRef = useRef(false); // onDone 중복 호출 방지
   const completedRef = useRef(false); // 마지막 프레임 유지 여부
+  const sequenceRef = useRef(sequenceId);
   const cloned = useMemo(() => SkeletonUtils.clone(scene), [scene]);
   const { actions } = useAnimations(animations, group);
 
@@ -38,6 +102,12 @@ function StepModel({
     const clipName = animations?.[0]?.name;
     const action = clipName ? actions[clipName] : undefined;
     if (!action) return;
+
+    if (sequenceRef.current !== sequenceId) {
+      sequenceRef.current = sequenceId;
+      completedRef.current = false;
+      doneRef.current = false;
+    }
 
     // 항상 구간 시작으로 이동
     action.clampWhenFinished = true; // 끝 프레임 정지 시 포즈 유지
@@ -73,7 +143,7 @@ function StepModel({
     action.play();
     action.paused = true;
     action.time = holdTime;
-  }, [active, actions, animations, currentStepIndex, stepIndex, stepInfo]);
+  }, [active, actions, animations, currentStepIndex, sequenceId, stepIndex, stepInfo]);
 
   // 진행 감시: end 도달 시 정지 및 콜백
   useFrame(() => {
@@ -103,7 +173,11 @@ function StepModel({
 export default function ThreeDLesson() {
   // 1~5번 슬롯 중 현재 재생 중인 스텝 인덱스(1-base). 완료되면 다음으로 이동.
   const [playingIndex, setPlayingIndex] = useState(1);
+  const [sequenceId, setSequenceId] = useState(0);
+  const [phase, setPhase] = useState('text'); // 'text' | 'animation' | 'delay' | 'complete'
   const { scene, animations } = useGLTF('/models/seopro_girl.glb');
+  const guideTimeoutRef = useRef(null);
+  const delayTimeoutRef = useRef(null);
 
   // 슬롯 위치 배치(좌->우). 필요시 간격 조절
   const correctionModelRotation = Math.PI / 8
@@ -115,27 +189,139 @@ export default function ThreeDLesson() {
     { idx: 5, pos: [4, 0, 0], rot: [0, correctionModelRotation, 0] },
   ];
 
-  const handleDone = (idx) => {
-    // 현재 idx를 마치면 다음 슬롯으로 진행(5에서 멈춤)
-    setPlayingIndex((prev) => (prev < 5 ? prev + 1 : 5));
-  };
+  const focusConfig = useMemo(() => {
+    if (phase === 'complete') {
+      return {
+        position: [0, CAMERA_BASE_HEIGHT + 0.2, CAMERA_OVERVIEW_Z],
+        lookAt: [0, 1.2, 0],
+      };
+    }
+
+    const viewingStep = phase === 'delay' ? Math.min(5, playingIndex + 1) : playingIndex;
+    const slot = slots.find((s) => s.idx === viewingStep) ?? slots[0];
+    const z = phase === 'text' ? CAMERA_CLOSE_Z : phase === 'delay' ? CAMERA_OVERVIEW_Z : CAMERA_ANIM_Z;
+
+    return {
+      position: [slot.pos[0], CAMERA_BASE_HEIGHT, z],
+      lookAt: [slot.pos[0], 1.15, 0],
+    };
+  }, [phase, playingIndex]);
+
+  const cleanupTimers = useCallback(() => {
+    if (guideTimeoutRef.current) {
+      clearTimeout(guideTimeoutRef.current);
+      guideTimeoutRef.current = null;
+    }
+    if (delayTimeoutRef.current) {
+      clearTimeout(delayTimeoutRef.current);
+      delayTimeoutRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => cleanupTimers, [cleanupTimers]);
+
+  useEffect(() => {
+    if (phase !== 'text') return;
+
+    if (guideTimeoutRef.current) {
+      clearTimeout(guideTimeoutRef.current);
+      guideTimeoutRef.current = null;
+    }
+
+    guideTimeoutRef.current = setTimeout(() => {
+      setPhase((prev) => (prev === 'text' ? 'animation' : prev));
+      guideTimeoutRef.current = null;
+    }, GUIDE_DISPLAY_MS);
+
+    return () => {
+      if (guideTimeoutRef.current) {
+        clearTimeout(guideTimeoutRef.current);
+        guideTimeoutRef.current = null;
+      }
+    };
+  }, [phase, playingIndex]);
+
+  const handleDone = useCallback((idx) => {
+    if (idx !== playingIndex) return;
+
+    if (idx >= 5) {
+      setPhase('complete');
+      return;
+    }
+
+    setPhase('delay');
+    if (delayTimeoutRef.current) clearTimeout(delayTimeoutRef.current);
+    delayTimeoutRef.current = setTimeout(() => {
+      setPlayingIndex(idx + 1);
+      setPhase('text');
+      delayTimeoutRef.current = null;
+    }, STEP_DELAY_MS);
+  }, [playingIndex]);
+
+  const handleRestart = useCallback(() => {
+    cleanupTimers();
+    setSequenceId((prev) => prev + 1);
+    setPlayingIndex(1);
+    setPhase('text');
+  }, [cleanupTimers]);
+
+  const handleSkip = useCallback(() => {
+    cleanupTimers();
+    setPlayingIndex((prev) => {
+      const next = Math.min(5, prev + 1);
+      setPhase(next > prev ? 'text' : 'complete');
+      return next;
+    });
+  }, [cleanupTimers]);
+
+  const nowPlayingLabel = phase === 'complete'
+    ? 'Sequence complete'
+    : `Now playing: Step ${playingIndex} (${phase === 'text' ? 'guide' : phase === 'animation' ? 'animation' : phase === 'delay' ? 'delay' : 'idle'})`;
 
   return (
     <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: 12 }}>
       {/* 설명 텍스트(2D): 각 슬롯 아래에 고정 표시 */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 8 }}>
-        {[1, 2, 3, 4, 5].map((i) => (
-          <div key={i} style={{ textAlign: 'center', fontSize: 14, lineHeight: 1.3 }}>
-            <strong>Step {i}</strong>
-            <div>{stepData[i].text}</div>
-          </div>
-        ))}
+        {[1, 2, 3, 4, 5].map((i) => {
+          const isActiveStep = i === playingIndex;
+          const highlight = stepData[i].highlight;
+
+          return (
+            <div
+              key={i}
+              style={{
+                textAlign: 'center',
+                fontSize: 14,
+                lineHeight: 1.3,
+                opacity: isActiveStep ? 1 : 0.65,
+                transition: 'opacity 0.3s ease',
+                minHeight: 64,
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'flex-start',
+                gap: 4,
+              }}
+            >
+              <strong>Step {i}</strong>
+              <div style={{ minHeight: 36 }}>
+                {isActiveStep ? <ShinyText>{stepData[i].text}</ShinyText> : stepData[i].text}
+              </div>
+              {highlight && (
+                <div className={`lesson-highlight lesson-highlight--inline ${isActiveStep ? 'is-active' : ''}`}>
+                  <span className="lesson-highlight__label">{highlight.label}</span>
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
 
       {/* 3D 뷰: 다섯 슬롯을 한 캔버스에 배치. 각 슬롯은 자기 차례에만 재생 후 마지막 프레임 고정 */}
-      <div style={{ width: '100%', height: 520 }}>
+      <div className="lesson-canvas-wrapper">
         <Canvas camera={{ position: [0, 1.5, 9], fov: 45 }}>
           <Stats />
+          <CameraRig focusPosition={focusConfig.position} focusLookAt={focusConfig.lookAt} />
           <ambientLight intensity={1.2} />
           <directionalLight position={[3, 6, 3]} intensity={1.6} />
           <Suspense fallback={null}>
@@ -148,24 +334,62 @@ export default function ThreeDLesson() {
                   stepInfo={stepData[idx]}
                   stepIndex={idx}
                   currentStepIndex={playingIndex}
+                  sequenceId={sequenceId}
                   position={pos}
                   rotation={rot}
-                  active={playingIndex === idx}
+                  active={playingIndex === idx && phase === 'animation'}
                   onDone={() => handleDone(idx)}
                 />
               ))}
             </Center>
           </Suspense>
           <gridHelper args={[20, 20]} />
-          <OrbitControls makeDefault />
+          <OrbitControls makeDefault enableZoom={false} enableRotate={false} enablePan={false} />
         </Canvas>
+        <div className="lesson-guide-overlay">
+          {(() => {
+            if (phase === 'complete') {
+              return (
+                <ShinyText as="div" className="lesson-guide-overlay__text">
+                  All steps complete! Great job.
+                </ShinyText>
+              );
+            }
+
+            if (phase === 'delay') {
+              return null;
+            }
+
+            const currentStep = stepData[playingIndex];
+            const text = currentStep?.text ?? '';
+            const highlight = currentStep?.highlight;
+
+            if (!text) return null;
+
+            return (
+              <div className="lesson-guide-overlay__content">
+                <ShinyText as="div" className="lesson-guide-overlay__text">
+                  {text}
+                </ShinyText>
+                {highlight && (
+                  <div className="lesson-highlight lesson-highlight--overlay">
+                    <span className="lesson-highlight__label">{highlight.label}</span>
+                    {highlight.detail && (
+                      <span className="lesson-highlight__detail">{highlight.detail}</span>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+        </div>
       </div>
 
       {/* 진행 컨트롤(옵션): 재시작/다음으로 건너뛰기 등 */}
       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-        <button onClick={() => setPlayingIndex(1)}>Restart sequence</button>
-        <button onClick={() => setPlayingIndex((p) => Math.min(5, p + 1))}>Skip to next</button>
-        <span>Now playing: Step {playingIndex}</span>
+        <button onClick={handleRestart}>Restart sequence</button>
+        <button onClick={handleSkip} disabled={playingIndex >= 5 && phase === 'complete'}>Skip to next</button>
+        <span>{nowPlayingLabel}</span>
       </div>
     </div>
   );
